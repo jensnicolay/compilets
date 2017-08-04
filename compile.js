@@ -3,20 +3,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const ts = require("typescript");
 const fs = require("fs");
 function generateDocumentation(fileNames, options) {
-    function mergeSignatures(sigs) {
-        let maxLength = 0;
-        const type = new Set();
-        for (const sig of sigs) {
-            maxLength = Math.max(maxLength, sig.getParameters().length);
-            type.add(sig.getReturnType());
-        }
-        const typeParameters = [];
-        const parameters = [];
-        for (let i = 0; i < maxLength; i++) {
-            parameters.push("p" + i);
-        }
-        return { typeParameters, parameters, type };
-    }
     function createPropertyAssignment(objectName, propertyName, right) {
         const left = ts.createPropertyAccess(ts.createIdentifier(objectName), ts.createIdentifier(propertyName));
         const expression = ts.createAssignment(left, right);
@@ -54,6 +40,11 @@ function generateDocumentation(fileNames, options) {
                     result = result.concat(compileInterfaceDeclaration(node));
                     break;
                 }
+            case ts.SyntaxKind.VariableStatement:
+                {
+                    result = result.concat(compileVariableStatement(node));
+                    break;
+                }
             default:
                 throw new Error("cannot handle statement " + ts.SyntaxKind[node.kind]);
         }
@@ -62,18 +53,12 @@ function generateDocumentation(fileNames, options) {
     function compileInterfaceDeclaration(node) {
         const interfaceType = checker.getTypeAtLocation(node);
         const interfaceName = interfaceType.getSymbol().getName();
-        const callSignatures = interfaceType.getCallSignatures();
-        const properties = interfaceType.getProperties();
-        const mergedSig = mergeSignatures(callSignatures);
         const result = [];
-        const typeParameters = mergedSig.typeParameters;
-        const parameters = mergedSig.parameters.map(p => ts.createParameter(undefined, undefined, undefined, ts.createIdentifier(p)));
-        const type = undefined;
-        const returnType = compileTypes([...mergedSig.type]);
-        const body = ts.createBlock([ts.createReturn(returnType)]);
-        const funDecl = ts.createFunctionExpression([], undefined, undefined, typeParameters, parameters, type, body);
-        const callStatement = createConstantAssignment(interfaceName, funDecl);
+        const callSignatures = interfaceType.getCallSignatures();
+        const callExpression = compileSignatures(callSignatures);
+        const callStatement = createConstantAssignment(interfaceName, callExpression);
         result.push(callStatement);
+        const properties = interfaceType.getProperties();
         for (const pr of properties) {
             const propertyName = pr.getName();
             const rightType = checker.getTypeAtLocation(pr.valueDeclaration);
@@ -83,10 +68,45 @@ function generateDocumentation(fileNames, options) {
         }
         return result;
     }
-    function compileObject(objectType) {
-        if ((objectType.objectFlags & ts.ObjectFlags.Anonymous) !== 0) {
-            const callSignatures = objectType.getCallSignatures();
-            const mergedSig = mergeSignatures(callSignatures);
+    function compileVariableStatement(node) {
+        let result = [];
+        for (const varDecl of node.declarationList.declarations) {
+            result = result.concat(compileVariableDeclaration(varDecl));
+        }
+        return result;
+    }
+    function compileVariableDeclaration(node) {
+        const variableName = node.name.text;
+        const variableType = node.type;
+        const typeExpression = compileType(variableType);
+        const declarationStatement = createConstantAssignment(variableName, typeExpression);
+        return [declarationStatement];
+    }
+    function join(exps) {
+        if (exps.length === 0) {
+            throw new Error("no expressions to join");
+        }
+        if (exps.length === 1) {
+            return exps[0];
+        }
+        return ts.createCall(ts.createIdentifier("join"), [], exps);
+    }
+    function compileSignatures(sigs) {
+        function mergeSignatures(sigs) {
+            let maxLength = 0;
+            const type = new Set();
+            for (const sig of sigs) {
+                maxLength = Math.max(maxLength, sig.getParameters().length);
+                type.add(sig.getReturnType());
+            }
+            const typeParameters = [];
+            const parameters = [];
+            for (let i = 0; i < maxLength; i++) {
+                parameters.push("p" + i);
+            }
+            return [{ typeParameters, parameters, type }];
+        }
+        function compileMergedSignature(mergedSig) {
             const typeParameters = mergedSig.typeParameters;
             const parameters = mergedSig.parameters.map(p => ts.createParameter(undefined, undefined, undefined, ts.createIdentifier(p)));
             const type = undefined;
@@ -94,6 +114,16 @@ function generateDocumentation(fileNames, options) {
             const body = ts.createBlock([ts.createReturn(returnType)]);
             const funDecl = ts.createFunctionExpression([], undefined, undefined, typeParameters, parameters, type, body);
             return funDecl;
+        }
+        const mergedSigs = mergeSignatures(sigs);
+        const expressions = mergedSigs.map(compileMergedSignature);
+        return join(expressions);
+    }
+    function compileObject(objectType) {
+        if ((objectType.objectFlags & ts.ObjectFlags.Anonymous) !== 0) {
+            const callSignatures = objectType.getCallSignatures();
+            const callExpression = compileSignatures(callSignatures);
+            return callExpression;
         }
         throw new Error("cannot handle " + checker.typeToString(objectType) + " with flags " + objectType.objectFlags);
     }
@@ -104,29 +134,33 @@ function generateDocumentation(fileNames, options) {
         const typeExpressions = [];
         while (types.length > 0) {
             const type = types.pop();
-            if ((type.flags & ts.TypeFlags.Null) !== 0) {
-                typeExpressions.push(ts.createNull());
+            if (type.flags === 0) {
+                const typeName = type.typeName.text;
+                const callExpression = ts.createCall(ts.createIdentifier(typeName), undefined, []);
+                typeExpressions.push(callExpression);
             }
-            if ((type.flags & ts.TypeFlags.Boolean) !== 0) {
-                typeExpressions.push(ts.createIdentifier("boolean"));
-            }
-            if ((type.flags & ts.TypeFlags.Undefined) !== 0) {
-                typeExpressions.push(ts.createIdentifier("undefined"));
-            }
-            if ((type.flags & ts.TypeFlags.String) !== 0) {
-                typeExpressions.push(ts.createIdentifier("string"));
-            }
-            if ((type.flags & ts.TypeFlags.Number) !== 0) {
-                typeExpressions.push(ts.createIdentifier("number"));
-            }
-            if ((type.flags & ts.TypeFlags.Object) !== 0) {
-                typeExpressions.push(compileObject(type));
+            else {
+                if ((type.flags & ts.TypeFlags.Null) !== 0) {
+                    typeExpressions.push(ts.createNull());
+                }
+                if ((type.flags & ts.TypeFlags.Boolean) !== 0) {
+                    typeExpressions.push(ts.createIdentifier("boolean"));
+                }
+                if ((type.flags & ts.TypeFlags.Undefined) !== 0) {
+                    typeExpressions.push(ts.createIdentifier("undefined"));
+                }
+                if ((type.flags & ts.TypeFlags.String) !== 0) {
+                    typeExpressions.push(ts.createIdentifier("string"));
+                }
+                if ((type.flags & ts.TypeFlags.Number) !== 0) {
+                    typeExpressions.push(ts.createIdentifier("number"));
+                }
+                if ((type.flags & ts.TypeFlags.Object) !== 0) {
+                    typeExpressions.push(compileObject(type));
+                }
             }
         }
-        if (typeExpressions.length === 1) {
-            return typeExpressions[0];
-        }
-        return ts.createCall(ts.createIdentifier("join"), [], typeExpressions);
+        return join(typeExpressions);
     }
     const program = ts.createProgram(fileNames, options);
     const checker = program.getTypeChecker();
