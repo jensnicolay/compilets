@@ -1,7 +1,8 @@
-// function II(ab)
-// {
-//     return "boolornull";
-// }
+// II = function (ab)
+//     {
+//         return "boolornull";
+//     };
+//
 // II.x = null;
 // II.f = function (p0, p1) { return boolean|string}
 // let ii = II;

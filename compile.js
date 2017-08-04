@@ -2,7 +2,6 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const ts = require("typescript");
 const fs = require("fs");
-/** Generate documentation for all classes in a set of .ts files */
 function generateDocumentation(fileNames, options) {
     function mergeSignatures(sigs) {
         let maxLength = 0;
@@ -16,7 +15,19 @@ function generateDocumentation(fileNames, options) {
         for (let i = 0; i < maxLength; i++) {
             parameters.push("p" + i);
         }
-        return [{ typeParameters, parameters, type }];
+        return { typeParameters, parameters, type };
+    }
+    function createPropertyAssignment(objectName, propertyName, right) {
+        const left = ts.createPropertyAccess(ts.createIdentifier(objectName), ts.createIdentifier(propertyName));
+        const expression = ts.createAssignment(left, right);
+        const statement = ts.createStatement(expression);
+        return statement;
+    }
+    function createConstantAssignment(name, right) {
+        const left = ts.createIdentifier(name);
+        const expression = ts.createAssignment(left, right);
+        const statement = ts.createStatement(expression);
+        return statement;
     }
     function compileProgram(node) {
         let result = [];
@@ -43,34 +54,79 @@ function generateDocumentation(fileNames, options) {
                     result = result.concat(compileInterfaceDeclaration(node));
                     break;
                 }
-            default: throw new Error("cannot handle statement kind " + node.kind);
+            default:
+                throw new Error("cannot handle statement " + ts.SyntaxKind[node.kind]);
         }
         return result;
     }
-    // function clone<T extends ts.Node>(node: T) : T
-    // {
-    //     switch (node.kind)
-    //     {
-    //         case ts.Identifier
-    //         default: throw new Error("cannot handle node kind " + ts.SyntaxKind[node.kind]);
-    //     }
-    // }
     function compileInterfaceDeclaration(node) {
         const interfaceType = checker.getTypeAtLocation(node);
+        const interfaceName = interfaceType.getSymbol().getName();
         const callSignatures = interfaceType.getCallSignatures();
         const properties = interfaceType.getProperties();
-        const mergedSigs = mergeSignatures(callSignatures);
+        const mergedSig = mergeSignatures(callSignatures);
         const result = [];
-        for (const ms of mergedSigs) {
-            const name = ts.createIdentifier(node.name.getText());
-            const typeParameters = [];
-            const parameters = ms.parameters.map(p => ts.createParameter(undefined, undefined, undefined, ts.createIdentifier(p)));
-            const type = ts.createUnionTypeNode([...ms.type].map(t => checker.typeToTypeNode(t)));
-            const body = ts.createBlock([]);
-            const funDecl = ts.createFunctionDeclaration([], [], undefined, name, typeParameters, parameters, type, body);
-            result.push(funDecl);
+        const typeParameters = mergedSig.typeParameters;
+        const parameters = mergedSig.parameters.map(p => ts.createParameter(undefined, undefined, undefined, ts.createIdentifier(p)));
+        const type = undefined;
+        const returnType = compileTypes([...mergedSig.type]);
+        const body = ts.createBlock([ts.createReturn(returnType)]);
+        const funDecl = ts.createFunctionExpression([], undefined, undefined, typeParameters, parameters, type, body);
+        const callStatement = createConstantAssignment(interfaceName, funDecl);
+        result.push(callStatement);
+        for (const pr of properties) {
+            const propertyName = pr.getName();
+            const rightType = checker.getTypeAtLocation(pr.valueDeclaration);
+            const expression = compileType(rightType);
+            const propertyStatement = createPropertyAssignment(interfaceName, propertyName, expression);
+            result.push(propertyStatement);
         }
         return result;
+    }
+    function compileObject(objectType) {
+        if ((objectType.objectFlags & ts.ObjectFlags.Anonymous) !== 0) {
+            const callSignatures = objectType.getCallSignatures();
+            const mergedSig = mergeSignatures(callSignatures);
+            const typeParameters = mergedSig.typeParameters;
+            const parameters = mergedSig.parameters.map(p => ts.createParameter(undefined, undefined, undefined, ts.createIdentifier(p)));
+            const type = undefined;
+            const returnType = compileTypes([...mergedSig.type]);
+            const body = ts.createBlock([ts.createReturn(returnType)]);
+            const funDecl = ts.createFunctionExpression([], undefined, undefined, typeParameters, parameters, type, body);
+            return funDecl;
+        }
+        throw new Error("cannot handle " + checker.typeToString(objectType) + " with flags " + objectType.objectFlags);
+    }
+    function compileType(type) {
+        return compileTypes([type]);
+    }
+    function compileTypes(types) {
+        const typeExpressions = [];
+        while (types.length > 0) {
+            const type = types.pop();
+            if ((type.flags & ts.TypeFlags.Null) !== 0) {
+                typeExpressions.push(ts.createNull());
+            }
+            if ((type.flags & ts.TypeFlags.Boolean) !== 0) {
+                typeExpressions.push(ts.createIdentifier("boolean"));
+            }
+            if ((type.flags & ts.TypeFlags.Undefined) !== 0) {
+                typeExpressions.push(ts.createIdentifier("undefined"));
+            }
+            if ((type.flags & ts.TypeFlags.String) !== 0) {
+                typeExpressions.push(ts.createIdentifier("string"));
+            }
+            if ((type.flags & ts.TypeFlags.Number) !== 0) {
+                typeExpressions.push(ts.createIdentifier("number"));
+            }
+            if ((type.flags & ts.TypeFlags.Object) !== 0) {
+                typeExpressions.push(compileObject(type));
+            }
+        }
+        if (typeExpressions.length === 1) {
+            return typeExpressions[0];
+        }
+        return ts.createCall(ts.createIdentifier("join"), [], typeExpressions);
     }
     const program = ts.createProgram(fileNames, options);
     const checker = program.getTypeChecker();
@@ -81,7 +137,5 @@ function generateDocumentation(fileNames, options) {
     fs.writeFileSync(resultFile.fileName, printed);
 }
 //generateDocumentation(["types/jquery/index.d.ts"], {
-const result = generateDocumentation(["test.ts"], {
-    target: ts.ScriptTarget.ES5, module: ts.ModuleKind.CommonJS
-});
+const result = generateDocumentation(["test.ts"], { target: ts.ScriptTarget.ES5, module: ts.ModuleKind.CommonJS });
 //# sourceMappingURL=compile.js.map
